@@ -1,0 +1,180 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { timingSafeEqual } from 'crypto';
+import { config } from '../config/index.js';
+import { logger } from '../utils/logger.js';
+import { tokenRepo, tradeRepo, positionRepo } from '../db/repo.js';
+import { addTokenToMonitor } from '../strategies/metadata.js';
+import { strategyEngine } from '../strategies/engine.js';
+import { buyToken, sellToken } from '../services/jupiter/executor.js';
+import { getDashboardStats, getTokenViews } from './dashboard.js';
+import { wallet } from '../wallet/index.js';
+
+const SOL_ADDRESS_REGEX = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** 常时间字符串比较，防 timing attack */
+function safeStringEq(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
+const addTokenSchema = z.object({
+  network: z.string().optional(),
+  address: z.string().regex(SOL_ADDRESS_REGEX),
+  symbol: z.string().optional(),
+});
+
+const buySchema = z.object({
+  address: z.string().regex(SOL_ADDRESS_REGEX),
+  solAmount: z.coerce.number().positive().max(100).optional(),
+  slippageBps: z.coerce.number().int().positive().max(10000).optional(),
+});
+
+const sellSchema = z.object({
+  address: z.string().regex(SOL_ADDRESS_REGEX),
+  amountUi: z.coerce.number().positive().optional(),
+  slippageBps: z.coerce.number().int().positive().max(10000).optional(),
+});
+
+export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  // 鉴权 hook: 任何 /api/* 接口都需要 x-api-token（如果配置了）
+  // 没配 API_TOKEN 时仅放行 loopback 来源，防止公网零鉴权裸奔
+  app.addHook('preHandler', async (req, reply) => {
+    const url = req.url || '';
+    if (!url.startsWith('/api/')) return;          // /webhook、/health、/ws 走自己的鉴权或开放
+    const ip = req.ip || '';
+    const isLoopback = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    if (config.API_TOKEN) {
+      const provided = req.headers['x-api-token'];
+      if (typeof provided === 'string' && safeStringEq(provided, config.API_TOKEN)) return;
+      // token 错或没传 → 仅当请求来自 loopback 才放行（方便本机直接 curl）
+      if (!isLoopback) {
+        return reply.code(401).send({ error: 'unauthorized', message: '需要 x-api-token header' });
+      }
+    } else {
+      // 未配置 API_TOKEN：只允许 loopback 调用 /api/*
+      if (!isLoopback) {
+        return reply.code(401).send({
+          error: 'api_token_required',
+          message: '请在 .env 中设置 API_TOKEN 后才能从远程访问 /api/*',
+        });
+      }
+    }
+  });
+
+  // ========== Health ==========
+  app.get('/health', async () => ({
+    ok: true,
+    walletUnlocked: wallet.isUnlocked,
+    walletAddress: wallet.isUnlocked ? wallet.address : null,
+    ts: Date.now(),
+  }));
+
+  // ========== Dashboard ==========
+  app.get('/api/dashboard/stats', async () => getDashboardStats());
+  app.get('/api/dashboard/tokens', async () => getTokenViews());
+
+  // ========== 监控代币 CRUD ==========
+  app.post('/api/tokens', async (req, reply) => {
+    const parsed = addTokenSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
+    }
+    await addTokenToMonitor(parsed.data.address, 'manual', parsed.data.symbol);
+    strategyEngine.subscribeToken(parsed.data.address);
+    return { ok: true };
+  });
+
+  app.delete('/api/tokens/:address', async (req: any, reply) => {
+    const address = req.params.address as string;
+    if (!SOL_ADDRESS_REGEX.test(address)) {
+      return reply.code(400).send({ error: 'invalid_address' });
+    }
+    const t = tokenRepo.get(address);
+    if (!t) return reply.code(404).send({ error: 'not_found' });
+    // 如果有持仓，提示
+    const pos = positionRepo.getOpenByToken(address);
+    if (pos && pos.amount_ui > 0) {
+      return reply.code(409).send({ error: 'has_open_position', message: '请先卖出持仓再移除' });
+    }
+    tokenRepo.setActive(address, false);
+    strategyEngine.unsubscribeToken(address);
+    return { ok: true };
+  });
+
+  // ========== 交易 ==========
+  app.post('/api/trade/buy', async (req, reply) => {
+    if (!wallet.isUnlocked) return reply.code(503).send({ error: 'wallet_locked' });
+    const parsed = buySchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
+    try {
+      const r = await buyToken({
+        tokenAddress: parsed.data.address,
+        solAmount: parsed.data.solAmount ?? config.DEFAULT_BUY_SOL,
+        slippageBps: parsed.data.slippageBps,
+        trigger: 'manual',
+      });
+      return { ok: true, ...r };
+    } catch (e: any) {
+      logger.error({ err: e.message }, '手动买入失败');
+      return reply.code(500).send({ error: 'buy_failed', message: e.message });
+    }
+  });
+
+  app.post('/api/trade/sell', async (req, reply) => {
+    if (!wallet.isUnlocked) return reply.code(503).send({ error: 'wallet_locked' });
+    const parsed = sellSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
+    try {
+      const r = await sellToken({
+        tokenAddress: parsed.data.address,
+        amountUi: parsed.data.amountUi,
+        slippageBps: parsed.data.slippageBps,
+        trigger: 'manual',
+      });
+      return { ok: true, ...r };
+    } catch (e: any) {
+      logger.error({ err: e.message }, '手动卖出失败');
+      return reply.code(500).send({ error: 'sell_failed', message: e.message });
+    }
+  });
+
+  // ========== 交易记录 ==========
+  app.get('/api/trades', async (req: any) => {
+    const limit = Math.min(Number(req.query?.limit) || 100, 500);
+    return tradeRepo.list(limit);
+  });
+
+  app.get('/api/positions', async () => positionRepo.listOpen());
+
+  // ========== Webhook 入口（带鉴权） ==========
+  app.post('/webhook/add-token', async (req, reply) => {
+    const provided = req.headers['x-webhook-secret'];
+    if (typeof provided !== 'string' || !safeStringEq(provided, config.WEBHOOK_SECRET)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    const parsed = addTokenSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
+    }
+    if (parsed.data.network && parsed.data.network !== 'solana') {
+      return reply.code(400).send({ error: 'only_solana_supported' });
+    }
+    await addTokenToMonitor(parsed.data.address, 'webhook', parsed.data.symbol);
+    strategyEngine.subscribeToken(parsed.data.address);
+    return { ok: true, address: parsed.data.address };
+  });
+
+  // ========== 策略配置只读（可扩展为可写） ==========
+  app.get('/api/config', async () => ({
+    defaultBuySol: config.DEFAULT_BUY_SOL,
+    defaultSlippageBps: config.DEFAULT_SLIPPAGE_BPS,
+    stopLossDropPct: config.STOP_LOSS_DROP_PCT,
+    takeProfitGainPct: config.TAKE_PROFIT_GAIN_PCT,
+    fdvMinUsd: config.FDV_MIN_USD,
+    lpMinUsd: config.LP_MIN_USD,
+    jitoMevProtectEnabled: config.JITO_TIP_LAMPORTS > 0,
+  }));
+}
