@@ -10,7 +10,6 @@ import { registerRoutes } from './api/routes.js';
 import { registerWsBridge } from './api/wsBridge.js';
 import { strategyEngine } from './strategies/engine.js';
 import path from 'path';
-import { sendInfo } from './services/discord/client.js';
 
 const KEYSTORE_PATH = path.resolve(process.cwd(), 'wallet.keystore.json');
 
@@ -62,18 +61,34 @@ async function bootstrap(): Promise<void> {
 
   // 3. HTTP server
   const app = Fastify({ logger: false, trustProxy: true });
-  // ★ 安全修：CORS 只允许 FRONTEND_URL，不再反射任意 origin（防 CSRF）
-  // 如果你部署到不同 host，把那个 host 加进 origins 数组里
-  const allowedOrigins = [config.FRONTEND_URL];
+
+  // CORS：FRONTEND_URL + EXTRA_CORS_ORIGINS（公网 IP 等）
+  // 关键：webhook 路径不做 CORS 校验（外部调用会带 Origin header）
+  const allowedOrigins = new Set([config.FRONTEND_URL, ...config.EXTRA_CORS_ORIGINS_LIST]);
   await app.register(cors, {
+    hook: 'preHandler',   // 用 preHandler 而非 onRequest，可以在路由匹配后再决定是否要 CORS
     origin: (origin, cb) => {
-      // 允许同源（无 origin 头，比如 curl 或 SSR）
-      if (!origin) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
+      if (!origin) return cb(null, true);                          // 同源 / curl
+      if (allowedOrigins.has(origin)) return cb(null, true);
       cb(new Error('CORS: origin 未授权'), false);
     },
     credentials: true,
   });
+
+  // ★ 让 webhook 完全跳过 CORS：在 onRequest 阶段拦下并打个标记，
+  //   但 @fastify/cors 的最简单旁路方式是用 origin 函数对 webhook URL 也直接放行
+  //   → 改用更直接的方法：onRequest 阶段判断 url 后跳过 cors hook
+  // 参考实现：用一个 preParsing hook 把 origin header 在 webhook 路径下"擦掉"，
+  //   这样 cors 插件不会拦截。
+  app.addHook('onRequest', async (req) => {
+    const url = req.url || '';
+    if (url.startsWith('/webhook/')) {
+      // 把 Origin header 删掉，CORS 插件会因此跳过
+      delete (req.headers as any).origin;
+      delete (req.headers as any).Origin;
+    }
+  });
+
   await app.register(websocket);
   await registerRoutes(app);
   registerWsBridge(app);
@@ -84,13 +99,13 @@ async function bootstrap(): Promise<void> {
   });
 
   await app.listen({ host: config.HOST, port: config.PORT });
-  logger.info({ port: config.PORT }, `HTTP/WS 监听在 ${config.HOST}:${config.PORT}`);
+  logger.info({ port: config.PORT, host: config.HOST }, `HTTP/WS 监听中`);
+  if (allowedOrigins.size > 1) {
+    logger.info({ origins: [...allowedOrigins] }, 'CORS 允许的 origin');
+  }
 
   // 4. 策略引擎
   strategyEngine.start();
-
-  // 5. 启动通知
-  await sendInfo('🤖 Trading Bot 已启动', `钱包: \`${wallet.address}\`\n监听端口: ${config.PORT}`);
 
   // 优雅关闭
   const shutdown = async (signal: string) => {

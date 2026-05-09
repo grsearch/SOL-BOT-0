@@ -10,6 +10,7 @@ const TOKEN_UPDATABLE_FIELDS = new Set<keyof Token>([
   'symbol', 'name', 'decimals',
   'fdv_usd', 'lp_usd', 'holders', 'age_seconds', 'created_at_unix',
   'price_usd', 'price_sol', 'high_24h', 'high_24h_at', 'volume_24h_usd',
+  'history_2h_price', 'history_6h_price', 'history_24h_price',
   'x_mentions_60m', 'x_engagement_avg', 'x_heat_score', 'x_last_query_at',
   'monitor_active', 'added_at', 'added_by',
   'last_alert_at', 'last_metadata_refresh_at',
@@ -142,20 +143,24 @@ export const positionRepo = {
       const newAmountUi = existing.amount_ui + args.amount_ui_added;
       const newAmountRaw = (BigInt(existing.amount_raw) + BigInt(args.amount_raw_added)).toString();
       const newSolSpent = existing.sol_spent + args.sol_spent;
-      // 平均成本（按 sol_spent / amount_ui 折算回 USD/SOL 价位）
       const newAvgPriceSol = newSolSpent / newAmountUi;
       const newAvgPriceUsd = (existing.avg_entry_price_usd * existing.amount_ui + args.price_usd * args.amount_ui_added) / newAmountUi;
+      const newBuyCount = (existing.buy_count ?? 0) + 1;
       db.prepare(`
         UPDATE positions
-        SET amount_raw = ?, amount_ui = ?, avg_entry_price_usd = ?, avg_entry_price_sol = ?, sol_spent = ?
+        SET amount_raw = ?, amount_ui = ?, avg_entry_price_usd = ?, avg_entry_price_sol = ?,
+            sol_spent = ?, last_buy_price_usd = ?, buy_count = ?
         WHERE id = ?
-      `).run(newAmountRaw, newAmountUi, newAvgPriceUsd, newAvgPriceSol, newSolSpent, existing.id);
+      `).run(newAmountRaw, newAmountUi, newAvgPriceUsd, newAvgPriceSol,
+        newSolSpent, args.price_usd, newBuyCount, existing.id);
       return this.getOpenByToken(args.token_address)!;
     }
-    const r = db.prepare(`
+    db.prepare(`
       INSERT INTO positions
-        (token_address, amount_raw, amount_ui, avg_entry_price_usd, avg_entry_price_sol, sol_spent, realized_pnl_sol, is_open, opened_at, auto_take_profit_active)
-      VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, 1)
+        (token_address, amount_raw, amount_ui, avg_entry_price_usd, avg_entry_price_sol,
+         sol_spent, realized_pnl_sol, is_open, opened_at, auto_take_profit_active,
+         last_buy_price_usd, buy_count)
+      VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?, 1, ?, 1)
     `).run(
       args.token_address,
       args.amount_raw_added,
@@ -164,6 +169,7 @@ export const positionRepo = {
       args.price_sol,
       args.sol_spent,
       args.ts,
+      args.price_usd,
     );
     return this.getOpenByToken(args.token_address)!;
   },
@@ -282,45 +288,6 @@ export const alertRepo = {
       VALUES (?, ?, ?, ?, ?)
     `).run(tokenAddress, type, JSON.stringify(payload), Date.now(), success ? 1 : 0);
     return r.lastInsertRowid as number;
-  },
-};
-
-// ============ X usage ============
-
-export const xUsageRepo = {
-  todayKey(): string {
-    return new Date().toISOString().slice(0, 10);
-  },
-
-  addReads(reads: number, costPerRead: number): { reads: number; cost_usd: number } {
-    const day = this.todayKey();
-    const db = getDb();
-    db.prepare(`
-      INSERT INTO x_api_usage (day, reads, cost_usd) VALUES (?, ?, ?)
-      ON CONFLICT(day) DO UPDATE SET reads = reads + excluded.reads, cost_usd = cost_usd + excluded.cost_usd
-    `).run(day, reads, reads * costPerRead);
-    return db.prepare('SELECT reads, cost_usd FROM x_api_usage WHERE day = ?').get(day) as any;
-  },
-
-  todayUsage(): { reads: number; cost_usd: number } {
-    const r = getDb().prepare('SELECT reads, cost_usd FROM x_api_usage WHERE day = ?').get(this.todayKey()) as any;
-    return r || { reads: 0, cost_usd: 0 };
-  },
-
-  isPostCached(postId: string, withinHours = 24): boolean {
-    const cutoff = Date.now() - withinHours * 3600 * 1000;
-    const r = getDb().prepare('SELECT 1 FROM x_post_cache WHERE post_id = ? AND fetched_at >= ?').get(postId, cutoff);
-    return !!r;
-  },
-
-  cachePost(postId: string, tokenAddress: string): void {
-    getDb().prepare('INSERT OR REPLACE INTO x_post_cache (post_id, token_address, fetched_at) VALUES (?, ?, ?)')
-      .run(postId, tokenAddress, Date.now());
-  },
-
-  pruneOldCache(daysToKeep = 2): number {
-    const cutoff = Date.now() - daysToKeep * 86400 * 1000;
-    return getDb().prepare('DELETE FROM x_post_cache WHERE fetched_at < ?').run(cutoff).changes;
   },
 };
 

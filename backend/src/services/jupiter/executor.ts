@@ -1,4 +1,4 @@
-import { LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
+import { LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { config } from '../../config/index.js';
 import { logger } from '../../utils/logger.js';
 import { wallet } from '../../wallet/index.js';
@@ -7,8 +7,9 @@ import { helius } from '../helius/client.js';
 import { birdeye } from '../birdeye/client.js';
 import { tokenRepo, positionRepo, tradeRepo, SOL_MINT } from '../../db/repo.js';
 import { getOwnerBalanceWithDecimals, rawToUi } from '../../utils/tokenMath.js';
+import type { TradeTrigger } from '../../types/index.js';
 
-export type TradeTrigger = 'manual' | 'auto_take_profit' | 'auto_remove_sell';
+export type { TradeTrigger };
 
 const SOL_DECIMALS = 9;
 const GAS_RESERVE_SOL = 0.01;
@@ -131,10 +132,15 @@ export async function buyToken(args: {
   return { tradeId, signature: result.signature, tokenAmountUi: actualOutUi };
 }
 
-/** 卖出：用代币换 SOL */
+/**
+ * 卖出：用代币换 SOL。
+ *
+ * ★ 重要语义：永远全仓卖出钱包里这个 mint 的所有余额。
+ * 这意味着不管该代币是程序自动买入的、手动买入的、还是 webhook 之外打过来的，
+ * 一旦触发卖出（手动或自动），都会清空钱包对该 mint 的全部持仓。
+ */
 export async function sellToken(args: {
   tokenAddress: string;
-  amountUi?: number;
   trigger: TradeTrigger;
   slippageBps?: number;
 }): Promise<{ tradeId: number; signature: string; solReceived: number; realizedPnlSol: number }> {
@@ -142,7 +148,7 @@ export async function sellToken(args: {
   const t = tokenRepo.get(args.tokenAddress);
   if (!t) throw new Error(`代币 ${args.tokenAddress} 未知`);
 
-  // ★ BUG #6/#9 修：链上 raw 余额，避免 UI <-> raw 浮点损失
+  // 链上 raw 余额（永远全卖）
   const before = await getOwnerBalanceWithDecimals(wallet.conn, wallet.publicKey, args.tokenAddress);
   if (!before || before.amountRaw <= 0n) {
     throw new Error('钱包没有该代币余额，无法卖出');
@@ -150,19 +156,7 @@ export async function sellToken(args: {
   const decimals = before.decimals;
   const balanceBeforeSol = await wallet.getSolBalance();
 
-  // 决定要卖的 raw 数量
-  let inAmountRawBn: bigint;
-  if (args.amountUi === undefined) {
-    inAmountRawBn = before.amountRaw;     // 全卖：直接用链上 raw 余额，零浮点风险
-  } else {
-    const fixed = args.amountUi.toFixed(decimals);
-    const [intPart, fracPart = ''] = fixed.split('.');
-    const padded = (fracPart + '0'.repeat(decimals)).slice(0, decimals);
-    inAmountRawBn = BigInt(intPart) * (10n ** BigInt(decimals)) + BigInt(padded);
-    if (inAmountRawBn > before.amountRaw) {
-      throw new Error(`卖出数量超过余额：${args.amountUi}（链上余额 ${rawToUi(before.amountRaw, decimals)}）`);
-    }
-  }
+  const inAmountRawBn = before.amountRaw;     // 全卖
   const inAmountRaw = inAmountRawBn.toString();
   const sellUi = rawToUi(inAmountRawBn, decimals);
 
@@ -209,11 +203,9 @@ export async function sellToken(args: {
     throw new Error(`卖出确认失败：${result.signature}`);
   }
 
-  // ★ BUG #10 修：用链上真实 SOL 余额 diff
   const balanceAfterSol = await wallet.getSolBalance();
   let actualSolReceived = balanceAfterSol - balanceBeforeSol;
   if (actualSolReceived <= 0) {
-    // 链上 RPC 滞后或异常 → 退回 quote
     logger.warn({ before: balanceBeforeSol, after: balanceAfterSol }, 'sell 后 SOL diff <=0，回退用 quote.outAmount');
     actualSolReceived = expectedSolUi;
   }
@@ -235,7 +227,7 @@ export async function sellToken(args: {
   logger.info({
     token: args.tokenAddress, sold: sellUi, gotSol: actualSolReceived,
     realized: sellResult.realized, sig: result.signature, trigger: args.trigger,
-  }, '卖出成功');
+  }, '卖出成功（全仓）');
 
   return {
     tradeId,

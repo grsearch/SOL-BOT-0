@@ -32,15 +32,14 @@ const buySchema = z.object({
   slippageBps: z.coerce.number().int().positive().max(10000).optional(),
 });
 
+// 卖出永远是全仓，所以 schema 里不再接 amountUi
 const sellSchema = z.object({
   address: z.string().regex(SOL_ADDRESS_REGEX),
-  amountUi: z.coerce.number().positive().optional(),
   slippageBps: z.coerce.number().int().positive().max(10000).optional(),
 });
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
-  // 鉴权 hook: 任何 /api/* 接口都需要 x-api-token（如果配置了）
-  // 没配 API_TOKEN 时仅放行 loopback 来源，防止公网零鉴权裸奔
+  // 鉴权 hook：仅 /api/* 走 API_TOKEN 校验
   app.addHook('preHandler', async (req, reply) => {
     const url = req.url || '';
     if (!url.startsWith('/api/')) return;          // /webhook、/health、/ws 走自己的鉴权或开放
@@ -49,12 +48,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (config.API_TOKEN) {
       const provided = req.headers['x-api-token'];
       if (typeof provided === 'string' && safeStringEq(provided, config.API_TOKEN)) return;
-      // token 错或没传 → 仅当请求来自 loopback 才放行（方便本机直接 curl）
       if (!isLoopback) {
         return reply.code(401).send({ error: 'unauthorized', message: '需要 x-api-token header' });
       }
     } else {
-      // 未配置 API_TOKEN：只允许 loopback 调用 /api/*
       if (!isLoopback) {
         return reply.code(401).send({
           error: 'api_token_required',
@@ -94,7 +91,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
     const t = tokenRepo.get(address);
     if (!t) return reply.code(404).send({ error: 'not_found' });
-    // 如果有持仓，提示
     const pos = positionRepo.getOpenByToken(address);
     if (pos && pos.amount_ui > 0) {
       return reply.code(409).send({ error: 'has_open_position', message: '请先卖出持仓再移除' });
@@ -123,6 +119,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  // 卖出永远全仓
   app.post('/api/trade/sell', async (req, reply) => {
     if (!wallet.isUnlocked) return reply.code(503).send({ error: 'wallet_locked' });
     const parsed = sellSchema.safeParse(req.body);
@@ -130,7 +127,6 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     try {
       const r = await sellToken({
         tokenAddress: parsed.data.address,
-        amountUi: parsed.data.amountUi,
         slippageBps: parsed.data.slippageBps,
         trigger: 'manual',
       });
@@ -149,12 +145,9 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/positions', async () => positionRepo.listOpen());
 
-  // ========== Webhook 入口（带鉴权） ==========
+  // ========== Webhook 入口（无鉴权 - 用户要求） ==========
+  // 注意：接受任何来源的 add-token 请求，依赖 IP 层面的网络隔离做安全
   app.post('/webhook/add-token', async (req, reply) => {
-    const provided = req.headers['x-webhook-secret'];
-    if (typeof provided !== 'string' || !safeStringEq(provided, config.WEBHOOK_SECRET)) {
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
     const parsed = addTokenSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_body', issues: parsed.error.issues });
@@ -167,14 +160,23 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     return { ok: true, address: parsed.data.address };
   });
 
-  // ========== 策略配置只读（可扩展为可写） ==========
+  // ========== 策略配置只读 ==========
   app.get('/api/config', async () => ({
     defaultBuySol: config.DEFAULT_BUY_SOL,
     defaultSlippageBps: config.DEFAULT_SLIPPAGE_BPS,
-    stopLossDropPct: config.STOP_LOSS_DROP_PCT,
     takeProfitGainPct: config.TAKE_PROFIT_GAIN_PCT,
+    rsiSellThreshold: config.RSI_SELL_THRESHOLD,
     fdvMinUsd: config.FDV_MIN_USD,
     lpMinUsd: config.LP_MIN_USD,
     jitoMevProtectEnabled: config.JITO_TIP_LAMPORTS > 0,
+    autoDipBuy: {
+      enabled: config.AUTO_DIP_BUY_ENABLED,
+      buySol: config.AUTO_DIP_BUY_SOL,
+      drop24hPct: config.AUTO_DIP_BUY_DROP_24H_PCT,
+      rsiThreshold: config.AUTO_DIP_BUY_RSI_THRESHOLD,
+      dcaDropPct: config.AUTO_DIP_DCA_DROP_PCT,
+      dcaSol: config.AUTO_DIP_DCA_SOL,
+      maxBuys: config.AUTO_DIP_MAX_BUYS,
+    },
   }));
 }

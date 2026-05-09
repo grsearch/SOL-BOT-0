@@ -1,18 +1,30 @@
-import 'dotenv/config';
+import { config as loadDotenv } from 'dotenv';
+import { existsSync } from 'fs';
+import path from 'path';
 import { z } from 'zod';
+
+// 从多个候选位置加载 .env，第一个存在的优先
+// 顺序：cwd/.env、cwd/../.env（项目根）、backend/.env（如果从根目录跑）
+const candidates = [
+  path.resolve(process.cwd(), '.env'),
+  path.resolve(process.cwd(), '..', '.env'),
+  path.resolve(process.cwd(), 'backend', '.env'),
+];
+for (const p of candidates) {
+  if (existsSync(p)) {
+    loadDotenv({ path: p });
+    break;
+  }
+}
 
 const envSchema = z.object({
   // API keys
   BIRDEYE_API_KEY: z.string().min(1, 'BIRDEYE_API_KEY 必填'),
   HELIUS_API_KEY: z.string().min(1, 'HELIUS_API_KEY 必填'),
   JUPITER_API_KEY: z.string().optional().default(''),
-  X_BEARER_TOKEN: z.string().optional().default(''),
-
-  // Discord
-  DISCORD_WEBHOOK_URL: z.string().url().optional().or(z.literal('')),
 
   // Webhook 鉴权
-  WEBHOOK_SECRET: z.string().min(8, 'WEBHOOK_SECRET 至少 8 位'),
+  WEBHOOK_SECRET: z.string().optional().default(''),
   // 前端 API 鉴权 token（可选 - 留空时仅 localhost 访问会被允许）
   API_TOKEN: z.string().optional().default(''),
 
@@ -23,31 +35,43 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3001),
   HOST: z.string().default('0.0.0.0'),
   FRONTEND_URL: z.string().default('http://localhost:5173'),
+  // 额外允许的 CORS origin（公网 IP 或额外域名），逗号分隔
+  EXTRA_CORS_ORIGINS: z.string().optional().default(''),
 
   // DB
   DATABASE_PATH: z.string().default('./data.db'),
 
-  // 策略
+  // 策略 - 通用
   DEFAULT_BUY_SOL: z.coerce.number().positive().default(1),
   DEFAULT_SLIPPAGE_BPS: z.coerce.number().int().positive().default(300),
   DEFAULT_PRIORITY_FEE_LAMPORTS: z.coerce.number().int().nonnegative().default(1_000_000),
   JITO_TIP_LAMPORTS: z.coerce.number().int().nonnegative().default(100_000),
 
-  // 报警/止盈
-  STOP_LOSS_DROP_PCT: z.coerce.number().positive().default(50),
-  STOP_LOSS_COOLDOWN_HOURS: z.coerce.number().positive().default(2),
+  // 止盈
   TAKE_PROFIT_GAIN_PCT: z.coerce.number().positive().default(100),
+  // RSI(7) 卖出阈值
+  RSI_SELL_THRESHOLD: z.coerce.number().positive().default(80),
+
+  // 自动逢低买入
+  AUTO_DIP_BUY_ENABLED: z.coerce.boolean().default(true),
+  AUTO_DIP_BUY_SOL: z.coerce.number().positive().default(1),
+  // 触发条件：24h 跌幅 ≥ X%
+  AUTO_DIP_BUY_DROP_24H_PCT: z.coerce.number().positive().default(70),
+  // 触发条件：15m RSI(7) < X
+  AUTO_DIP_BUY_RSI_THRESHOLD: z.coerce.number().positive().default(30),
+  // 补仓：相对自己上次买入价又跌 ≥ X%
+  AUTO_DIP_DCA_DROP_PCT: z.coerce.number().positive().default(50),
+  // 补仓 SOL 数量（默认与首次相同）
+  AUTO_DIP_DCA_SOL: z.coerce.number().positive().default(1),
+  // 补仓最大次数（含首次）
+  AUTO_DIP_MAX_BUYS: z.coerce.number().int().positive().default(5),
 
   // 监控
   FDV_MIN_USD: z.coerce.number().nonnegative().default(30_000),
   LP_MIN_USD: z.coerce.number().nonnegative().default(10_000),
   MONITOR_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
-
-  // X
-  X_DAILY_BUDGET_USD: z.coerce.number().nonnegative().default(10),
-  X_REFRESH_INTERVAL_MS: z.coerce.number().int().positive().default(900_000),
-  X_FALLBACK_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
-  X_COST_PER_READ_USD: z.coerce.number().nonnegative().default(0.005),
+  // 自动策略评估周期（每 N 秒拉一次 OHLCV/RSI 检查每个币）
+  AUTO_STRATEGY_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
 
   // RPC
   SOLANA_RPC_URL: z.string().url().optional(),
@@ -69,10 +93,17 @@ const env = parsed.data;
 const rpcUrl = env.SOLANA_RPC_URL || `https://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`;
 const wsUrl = env.SOLANA_WS_URL || `wss://mainnet.helius-rpc.com/?api-key=${env.HELIUS_API_KEY}`;
 
+// 把 EXTRA_CORS_ORIGINS 解析成数组
+const extraCorsOrigins = env.EXTRA_CORS_ORIGINS
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+
 export const config = {
   ...env,
   SOLANA_RPC_URL: rpcUrl,
   SOLANA_WS_URL: wsUrl,
+  EXTRA_CORS_ORIGINS_LIST: extraCorsOrigins,
 } as const;
 
 export type Config = typeof config;

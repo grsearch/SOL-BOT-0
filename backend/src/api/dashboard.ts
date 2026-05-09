@@ -4,7 +4,7 @@ import { birdeye } from '../services/birdeye/client.js';
 import type { TokenView, DashboardStats } from '../types/index.js';
 import { SOL_MINT } from '../db/repo.js';
 
-// SOL 价格 30 秒缓存，避免每次 dashboard 刷新都 hit Birdeye
+// SOL 价格 30 秒缓存
 let solPriceCache: { price: number | null; ts: number } = { price: null, ts: 0 };
 const SOL_PRICE_TTL_MS = 30_000;
 async function cachedSolPrice(): Promise<number | null> {
@@ -21,7 +21,6 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const realized = positionRepo.pnlSince(since24h);
   const trades24h = tradeRepo.countSince(since24h);
 
-  // 未实现盈亏 = sum(open positions: (current_price - avg_entry) * amount / sol_price)
   const positions = positionRepo.listOpen();
   const solPrice = await cachedSolPrice();
   let unrealized = 0;
@@ -57,7 +56,7 @@ export async function getTokenViews(): Promise<TokenView[]> {
   const positions = new Map(positionRepo.listOpen().map(p => [p.token_address, p]));
   const solPrice = await cachedSolPrice();
 
-  return tokens.map((t) => {
+  const views: TokenView[] = tokens.map((t) => {
     let pctFromHigh: number | null = null;
     if (t.high_24h && t.high_24h > 0 && t.price_usd) {
       pctFromHigh = ((t.price_usd - t.high_24h) / t.high_24h) * 100;
@@ -75,6 +74,22 @@ export async function getTokenViews(): Promise<TokenView[]> {
       has_open_position: !!pos,
       position_amount_ui: pos?.amount_ui ?? null,
       unrealized_pnl_sol: unrealized,
+      avg_entry_price_usd: pos?.avg_entry_price_usd ?? null,
+      sol_spent: pos?.sol_spent ?? null,
+      last_buy_price_usd: pos?.last_buy_price_usd ?? null,
     };
   });
+
+  // 按跌幅排序：跌得最多的在最前（pct_from_high_24h 越小越靠前）
+  // null 排到最后
+  views.sort((a, b) => {
+    const av = a.pct_from_high_24h;
+    const bv = b.pct_from_high_24h;
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return av - bv;
+  });
+
+  return views;
 }

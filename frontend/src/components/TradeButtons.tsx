@@ -11,7 +11,6 @@ interface Props {
 export function TradeButtons({ token, defaultBuySol, defaultSlippageBps, onTraded }: Props) {
   const [open, setOpen] = useState<null | 'buy' | 'sell'>(null);
   const [solAmount, setSolAmount] = useState<number>(defaultBuySol);
-  const [sellPct, setSellPct] = useState<number>(100);
   const [slippageBps, setSlippageBps] = useState<number>(defaultSlippageBps);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -29,13 +28,18 @@ export function TradeButtons({ token, defaultBuySol, defaultSlippageBps, onTrade
   async function doSell() {
     setBusy(true); setErr(null);
     try {
-      const amt = token.position_amount_ui ? token.position_amount_ui * (sellPct / 100) : undefined;
-      await api.sell(token.address, amt, slippageBps);
+      // ★ 永远全仓卖（不再传 amountUi）
+      await api.sell(token.address, slippageBps);
       setOpen(null);
       onTraded();
     } catch (e: any) { setErr(e.message); }
     finally { setBusy(false); }
   }
+
+  // 检测钱包余额：has_open_position 是后端按 DB 持仓判定的，
+  // 但用户也可能从外部往钱包打了币（不走持仓表）。考虑到当前数据来源限制，
+  // 卖出按钮只要 has_open_position 就启用 — 钱包真有余额由后端 sellToken 自己校验。
+  const sellEnabled = token.has_open_position;
 
   return (
     <div className="flex gap-1">
@@ -45,8 +49,9 @@ export function TradeButtons({ token, defaultBuySol, defaultSlippageBps, onTrade
       >买入</button>
       <button
         onClick={() => { setErr(null); setOpen('sell'); }}
-        disabled={!token.has_open_position}
+        disabled={!sellEnabled}
         className="bg-red/20 hover:bg-red/30 text-red px-2 py-1 rounded text-xs font-medium disabled:opacity-30 disabled:cursor-not-allowed"
+        title="卖出会清空钱包里该代币的全部余额"
       >卖出</button>
 
       {open === 'buy' && (
@@ -74,21 +79,14 @@ export function TradeButtons({ token, defaultBuySol, defaultSlippageBps, onTrade
 
       {open === 'sell' && (
         <Modal title={`卖出 ${token.symbol ?? '?'}`} onClose={() => setOpen(null)}>
-          <div className="text-xs text-muted mb-2">当前持仓：{token.position_amount_ui?.toFixed(2) ?? '0'} {token.symbol}</div>
-          <Field label="卖出比例 (%)">
-            <div className="flex gap-2">
-              {[25, 50, 75, 100].map(p => (
-                <button key={p} type="button" onClick={() => setSellPct(p)}
-                  className={`px-3 py-1 text-xs rounded border ${sellPct === p ? 'border-accent text-accent' : 'border-border'}`}>
-                  {p}%
-                </button>
-              ))}
-              <input type="number" step="1" min="1" max="100" value={sellPct}
-                onChange={e => setSellPct(parseInt(e.target.value) || 100)}
-                className="flex-1 bg-bg border border-border rounded px-3 py-1 text-sm" />
-            </div>
-          </Field>
-          <Field label="滑点 (bps)">
+          <div className="bg-yellow/10 border border-yellow/30 rounded p-3 mb-3 text-xs">
+            ⚠️ 卖出会清空钱包里 <code className="font-mono">{token.symbol ?? token.address.slice(0, 8)}</code> 的全部余额（不论是程序自动买入的、手动买入的、还是外部打过来的）。
+          </div>
+          <div className="text-xs text-muted mb-3">
+            DB 记录持仓：{token.position_amount_ui?.toFixed(2) ?? '0'} {token.symbol ?? ''}
+            {token.avg_entry_price_usd ? ` · 均价 $${token.avg_entry_price_usd.toFixed(6)}` : ''}
+          </div>
+          <Field label="滑点 (bps，100 = 1%)">
             <input type="number" step="50" min="50" max="5000" value={slippageBps}
               onChange={e => setSlippageBps(parseInt(e.target.value) || 300)}
               className="w-full bg-bg border border-border rounded px-3 py-2 text-sm" />
@@ -98,7 +96,7 @@ export function TradeButtons({ token, defaultBuySol, defaultSlippageBps, onTrade
             <button onClick={() => setOpen(null)} className="px-4 py-2 text-sm border border-border rounded">取消</button>
             <button onClick={doSell} disabled={busy}
               className="px-4 py-2 text-sm bg-red text-bg rounded font-medium disabled:opacity-50">
-              {busy ? '提交中...' : `确认卖出 ${sellPct}%`}
+              {busy ? '提交中...' : '确认全仓卖出'}
             </button>
           </div>
         </Modal>

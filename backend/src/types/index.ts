@@ -13,6 +13,10 @@ export interface Token {
   high_24h: number | null;
   high_24h_at: number | null;
   volume_24h_usd: number | null;
+  history_2h_price: number | null;
+  history_6h_price: number | null;
+  history_24h_price: number | null;
+  // X mentions（已废弃，但 schema 保留兼容）
   x_mentions_60m: number;
   x_engagement_avg: number;
   x_heat_score: number;
@@ -37,13 +41,23 @@ export interface Position {
   opened_at: number;
   closed_at: number | null;
   auto_take_profit_active: number;
+  last_buy_price_usd: number | null;   // DCA 判定基准
+  buy_count: number;                   // 含 DCA 的累计买入次数
 }
+
+export type TradeTrigger =
+  | 'manual'
+  | 'auto_take_profit'
+  | 'auto_remove_sell'
+  | 'auto_dip_buy'
+  | 'auto_dip_buy_dca'
+  | 'auto_rsi_sell';
 
 export interface Trade {
   id: number;
   token_address: string;
   side: 'buy' | 'sell';
-  trigger: 'manual' | 'auto_take_profit' | 'auto_remove_sell';
+  trigger: TradeTrigger;
   in_mint: string;
   out_mint: string;
   in_amount_raw: string;
@@ -59,7 +73,7 @@ export interface Trade {
   priority_fee_lamports: number | null;
   created_at: number;
   confirmed_at: number | null;
-  realized_pnl_sol: number | null;       // 仅 sell 有意义：本次卖出的已实现盈亏（SOL）
+  realized_pnl_sol: number | null;
 }
 
 export interface Alert {
@@ -73,12 +87,15 @@ export interface Alert {
 
 // 与前端交互用的 DTO
 export interface TokenView extends Token {
-  // 计算字段
-  pct_from_high_24h: number | null;     // (price - high) / high
-  pct_change_24h: number | null;        // 同义于上面
+  pct_from_high_24h: number | null;
+  pct_change_24h: number | null;
   has_open_position: boolean;
   position_amount_ui: number | null;
   unrealized_pnl_sol: number | null;
+  // ★ 新增：单币持仓盈亏展示
+  avg_entry_price_usd: number | null;
+  sol_spent: number | null;
+  last_buy_price_usd: number | null;
 }
 
 export interface DashboardStats {

@@ -54,10 +54,23 @@ export function DashboardPage() {
       />
 
       {config && (
-        <div className="mt-4 text-xs text-muted">
-          策略: 涨 {config.takeProfitGainPct}% 自动止盈 · 跌 {config.stopLossDropPct}% 报警
-          · FDV ≥ ${config.fdvMinUsd} · LP ≥ ${config.lpMinUsd}
-          · MEV 保护: {config.jitoMevProtectEnabled ? '✓ Jito' : '✗'}
+        <div className="mt-4 text-xs text-muted space-y-1">
+          <div>
+            <span className="text-text">卖出策略：</span>
+            涨 {config.takeProfitGainPct}% 全仓止盈 · 15m RSI(7) &gt; {config.rsiSellThreshold} 立即全仓卖
+          </div>
+          {config.autoDipBuy?.enabled && (
+            <div>
+              <span className="text-text">自动逢低买入：</span>
+              24h 跌 ≥ {config.autoDipBuy.drop24hPct}% 且 RSI(7) &lt; {config.autoDipBuy.rsiThreshold} → 买 {config.autoDipBuy.buySol} SOL
+              · 自上次买入价又跌 ≥ {config.autoDipBuy.dcaDropPct}% 且 RSI(7) &lt; {config.autoDipBuy.rsiThreshold} → 补 {config.autoDipBuy.dcaSol} SOL
+              · 最多 {config.autoDipBuy.maxBuys} 次
+            </div>
+          )}
+          <div>
+            <span className="text-text">监控阈值：</span>
+            FDV ≥ ${config.fdvMinUsd} · LP ≥ ${config.lpMinUsd} · MEV 保护: {config.jitoMevProtectEnabled ? '✓ Jito' : '✗'}
+          </div>
         </div>
       )}
     </div>

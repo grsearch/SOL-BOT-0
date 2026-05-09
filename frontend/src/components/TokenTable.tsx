@@ -1,5 +1,5 @@
 import { api, type TokenView } from '../api/client';
-import { fmtUsd, fmtPct, fmtAge, fmtNum, shortAddr, pctClass } from '../api/format';
+import { fmtUsd, fmtPct, fmtAge, fmtNum, fmtSol, shortAddr, pctClass } from '../api/format';
 import { TradeButtons } from './TradeButtons';
 
 interface Props {
@@ -43,8 +43,8 @@ export function TokenTable({ tokens, livePrices, defaultBuySol, defaultSlippageB
               <th className="text-right p-3 font-normal">24h Vol</th>
               <th className="text-right p-3 font-normal">Holders</th>
               <th className="text-right p-3 font-normal">Age</th>
-              <th className="text-right p-3 font-normal">X 60m</th>
               <th className="text-right p-3 font-normal">持仓</th>
+              <th className="text-right p-3 font-normal">盈亏</th>
               <th className="text-right p-3 font-normal">操作</th>
             </tr>
           </thead>
@@ -57,6 +57,14 @@ export function TokenTable({ tokens, livePrices, defaultBuySol, defaultSlippageB
               if (live && t.high_24h && t.high_24h > 0) {
                 pctFromHigh = ((live.priceUsd - t.high_24h) / t.high_24h) * 100;
               }
+
+              // 单币持仓盈亏：用最新 currentPrice 实时计算 pct（vs avg_entry_price_usd）
+              // unrealized_pnl_sol 是后端用 30s 缓存价算的，pct 用前端最新价
+              let entryPctChange: number | null = null;
+              if (t.has_open_position && t.avg_entry_price_usd && t.avg_entry_price_usd > 0 && currentPrice != null) {
+                entryPctChange = ((currentPrice - t.avg_entry_price_usd) / t.avg_entry_price_usd) * 100;
+              }
+
               const gmgnUrl = `https://gmgn.ai/sol/token/${t.address}`;
               return (
                 <tr key={t.address} className="border-t border-border hover:bg-panel2/40">
@@ -84,11 +92,25 @@ export function TokenTable({ tokens, livePrices, defaultBuySol, defaultSlippageB
                   <td className="p-3 text-right font-mono">{fmtUsd(t.volume_24h_usd)}</td>
                   <td className="p-3 text-right font-mono">{fmtNum(t.holders)}</td>
                   <td className="p-3 text-right">{fmtAge(t.age_seconds)}</td>
-                  <td className="p-3 text-right font-mono">{t.x_mentions_60m ?? 0}</td>
                   <td className="p-3 text-right">
                     {t.has_open_position
                       ? <span className="text-accent text-xs">{t.position_amount_ui?.toFixed(2)}</span>
                       : <span className="text-muted text-xs">—</span>}
+                  </td>
+                  <td className="p-3 text-right font-mono text-xs whitespace-nowrap">
+                    {t.has_open_position ? (
+                      <div>
+                        <div className={pctClass(t.unrealized_pnl_sol)}>
+                          {t.unrealized_pnl_sol != null && t.unrealized_pnl_sol >= 0 ? '+' : ''}
+                          {fmtSol(t.unrealized_pnl_sol)}
+                        </div>
+                        <div className={`${pctClass(entryPctChange)} text-[11px]`}>
+                          {fmtPct(entryPctChange)}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-muted">—</span>
+                    )}
                   </td>
                   <td className="p-3">
                     <div className="flex gap-1 justify-end items-center">

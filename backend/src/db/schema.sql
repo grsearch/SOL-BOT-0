@@ -16,7 +16,11 @@ CREATE TABLE IF NOT EXISTS tokens (
     high_24h REAL,                      -- 滚动 24h 内见过的最高价（USD）
     high_24h_at INTEGER,                -- 该最高价的时间戳
     volume_24h_usd REAL,
-    -- X mentions
+    -- 反推 24h 高点的辅助字段：来自 Birdeye token_overview
+    history_2h_price REAL,
+    history_6h_price REAL,
+    history_24h_price REAL,
+    -- X mentions（已废弃但保留兼容）
     x_mentions_60m INTEGER DEFAULT 0,
     x_engagement_avg REAL DEFAULT 0,
     x_heat_score REAL DEFAULT 0,
@@ -45,6 +49,10 @@ CREATE TABLE IF NOT EXISTS positions (
     opened_at INTEGER NOT NULL,
     closed_at INTEGER,
     auto_take_profit_active INTEGER NOT NULL DEFAULT 1,
+    -- 自动逢低买入：上一次买入价（USD），用于 DCA 判定
+    last_buy_price_usd REAL,
+    -- 此仓位累计买入次数（含 DCA），用于限制最多 DCA 次数
+    buy_count INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (token_address) REFERENCES tokens(address)
 );
 

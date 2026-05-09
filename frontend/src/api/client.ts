@@ -13,9 +13,9 @@ export interface TokenView {
   high_24h: number | null;
   high_24h_at: number | null;
   volume_24h_usd: number | null;
-  x_mentions_60m: number;
-  x_engagement_avg: number;
-  x_heat_score: number;
+  history_2h_price: number | null;
+  history_6h_price: number | null;
+  history_24h_price: number | null;
   monitor_active: number;
   added_at: number;
   added_by: string | null;
@@ -24,6 +24,10 @@ export interface TokenView {
   has_open_position: boolean;
   position_amount_ui: number | null;
   unrealized_pnl_sol: number | null;
+  // 新增持仓信息
+  avg_entry_price_usd: number | null;
+  sol_spent: number | null;
+  last_buy_price_usd: number | null;
 }
 
 export interface DashboardStats {
@@ -53,11 +57,12 @@ export interface Trade {
   slippage_bps: number | null;
   created_at: number;
   confirmed_at: number | null;
+  realized_pnl_sol: number | null;
 }
 
 // API token：前端通过 localStorage / 输入框获取，附加到每个请求 header
 function getApiToken(): string {
-  // 1) URL 参数: ?api_token=xxx（首次启动时设置）
+  // 1) URL 参数: ?api_token=xxx
   const u = new URL(window.location.href);
   const fromUrl = u.searchParams.get('api_token');
   if (fromUrl) {
@@ -66,7 +71,6 @@ function getApiToken(): string {
     window.history.replaceState({}, '', u.toString());
     return fromUrl;
   }
-  // 2) localStorage
   try { return localStorage.getItem('api_token') ?? ''; } catch { return ''; }
 }
 
@@ -97,8 +101,9 @@ export const api = {
     call<{ ok: boolean }>('DELETE', `/api/tokens/${address}`),
   buy: (address: string, solAmount?: number, slippageBps?: number) =>
     call<{ ok: boolean; signature: string; tradeId: number }>('POST', '/api/trade/buy', { address, solAmount, slippageBps }),
-  sell: (address: string, amountUi?: number, slippageBps?: number) =>
-    call<{ ok: boolean; signature: string; solReceived: number }>('POST', '/api/trade/sell', { address, amountUi, slippageBps }),
+  // ★ 卖出永远全仓，不再接受 amountUi
+  sell: (address: string, slippageBps?: number) =>
+    call<{ ok: boolean; signature: string; solReceived: number }>('POST', '/api/trade/sell', { address, slippageBps }),
   trades: (limit = 100) => call<Trade[]>('GET', `/api/trades?limit=${limit}`),
   config: () => call<any>('GET', '/api/config'),
 };
